@@ -1,0 +1,193 @@
+import fs from 'fs';
+import path from 'path';
+import yaml from 'yaml';
+
+/**
+ * Phase 4: The Reverse-Compiler
+ * Takes structured JSON from the ZKE and compiles it into perfectly formatted OIS Markdown.
+ */
+export class MarkdownCompiler {
+  constructor(registryRoot) {
+    this.registryRoot = registryRoot;
+  }
+
+  /**
+   * Compiles and writes an Axiom artifact to disk.
+   */
+  async compileAndWriteAxiom(payload, parserGraph) {
+    const { title, mandate, mechanics, rationale, system_consequences } = payload;
+    
+    const existingAxioms = Array.from(parserGraph.values()).filter(n => n.metadata.domain && n.metadata.domain.includes('#axioms'));
+    const nextNum = (existingAxioms.length * 10) + 10;
+    const paddedNum = nextNum.toString().padStart(3, '0');
+    
+    const slug = title.replace(/^The\s+/i, '').replace(/[^a-zA-Z0-9]/g, '-').toUpperCase().substring(0, 20).replace(/-+$/, '');
+    const uid = `KMS-META-${paddedNum}-${slug}`;
+
+    const targetDir = path.join(this.registryRoot, 'gov/axioms');
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const filePath = path.join(targetDir, `${uid}.md`);
+
+    const frontmatter = {
+      'artifact-uid': uid,
+      'schema-version': '1.0.0',
+      'ka-gate-auth': 'ROLE-KA-ROOT',
+      'status': 'ACTIVE',
+      'domain': '#axioms | #Internal',
+      'org-root': 'org',
+      'upstream-context': '[[./KMS-GOV-AXIOM-CHARTER.md]]' 
+    };
+
+    let markdown = `# Axiom: ${title} (${uid})\n\n`;
+    markdown += `---\n${yaml.stringify(frontmatter)}---\n\n`;
+    
+    markdown += `## 1. The Mandate\n**"${mandate}"**\n\n`;
+    markdown += `## 2. Mechanics\n`;
+    mechanics.forEach(m => { markdown += `*   ${m}\n`; });
+    markdown += `\n## 3. Rationale\n${rationale}\n\n`;
+    markdown += `## 4. System Consequences\n`;
+    system_consequences.forEach(sc => { markdown += `*   ${sc}\n`; });
+    markdown += `\n---\n🛡️ **[DLR_AUD_ARTIFACT]** ${uid} compiled via MCP Gatekeeper.`;
+
+    fs.writeFileSync(filePath, markdown, 'utf8');
+
+    return { uid, path: filePath, status: 'SUCCESS' };
+  }
+
+  /**
+   * Compiles and writes a Role Spec artifact to disk.
+   */
+  async compileAndWriteRoleSpec(payload) {
+    const { id, title, entity_class, hierarchy_level, domain, clearance, mission, pillars, technical_duties, constraints, upstream_context } = payload;
+    
+    const targetDir = path.join(this.registryRoot, 'eng/roles'); 
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const filePath = path.join(targetDir, `${id}.md`);
+
+    const frontmatter = {
+      'artifact-uid': id,
+      'schema-version': '1.0.0',
+      'ka-gate-auth': 'ROLE-KA-ROOT',
+      'status': 'ACTIVE',
+      'domain': domain,
+      'org-root': 'org',
+      'upstream-context': upstream_context
+    };
+
+    let markdown = `# Entity Role Spec: ${title} (${id})\n\n`;
+    markdown += `---\n${yaml.stringify(frontmatter)}---\n\n`;
+    
+    markdown += `## 1. Metadata (Role Identity)\n`;
+    markdown += `- **ID:** \`${id}\`\n`;
+    markdown += `- **Entity Class:** \`${entity_class}\`\n`;
+    markdown += `- **Hierarchy Level:** ${hierarchy_level}\n`;
+    markdown += `- **Domain:** ${domain}\n`;
+    markdown += `- **Clearance:** ${clearance}\n\n`;
+
+    markdown += `## 2. Mission\n${mission}\n\n`;
+
+    markdown += `## 3. Pillars\n`;
+    pillars.forEach(p => { markdown += `- ${p}\n`; });
+    markdown += `\n`;
+
+    markdown += `## 4. Specific Technical Duties\n`;
+    technical_duties.forEach((d, i) => { 
+        const dNum = (i+1).toString().padStart(2, '0');
+        markdown += `- **[D-${dNum}]** ${d}\n`; 
+    });
+    markdown += `\n`;
+
+    markdown += `## 5. Constraints & Boundary Conditions (The Voids)\n`;
+    constraints.forEach(c => { markdown += `- ${c}\n`; });
+    markdown += `\n`;
+
+    markdown += `---\n🛡️ **[DLR_AUD_ARTIFACT]** ${id} compiled via MCP Gatekeeper.`;
+
+    fs.writeFileSync(filePath, markdown, 'utf8');
+
+    return { uid: id, path: filePath, status: 'SUCCESS' };
+  }
+
+  /**
+   * Surgically edits a specific field in an existing node, recompiling it gracefully.
+   */
+  async updateArtifactField(uid, field, newContent, parserGraph) {
+      const node = parserGraph.get(uid);
+      if (!node) throw new Error(`Cannot update: Node ${uid} not found.`);
+
+      const content = fs.readFileSync(node.path, 'utf8');
+      
+      // Simple regex replacement for lists or paragraphs under a specific header
+      // We look for the header (e.g., "## 3. Pillars") and replace everything until the next "## " or "---"
+      
+      // Create a friendly regex version of the field (e.g. 'pillars' -> matches '## X. Pillars')
+      const fieldRegex = new RegExp(`(##\\s*\\d+\\.\\s*${field}\\s*\\n)([\\s\\S]*?)(?=\\n##|\\n---)`, 'i');
+      
+      let newMarkdownBlock = '';
+      if (Array.isArray(newContent)) {
+          newContent.forEach(item => { newMarkdownBlock += `- ${item}\n`; });
+      } else {
+          newMarkdownBlock = `${newContent}\n`;
+      }
+
+      const updatedContent = content.replace(fieldRegex, `$1${newMarkdownBlock}`);
+      
+      if (updatedContent === content) {
+          throw new Error(`Field ${field} not found or could not be cleanly replaced in markdown.`);
+      }
+
+      fs.writeFileSync(node.path, updatedContent, 'utf8');
+      
+      return { uid, path: node.path, status: 'UPDATED' };
+  }
+
+  /**
+   * Compiles and writes a Protocol artifact to disk.
+   */
+  async compileAndWriteProtocol(payload, parserGraph) {
+    const { title, steps, domain, upstream_context } = payload;
+    
+    // Find next available KMS-PROC number
+    const existingProcs = Array.from(parserGraph.values()).filter(n => n.metadata.domain && n.metadata.domain.includes('#protocols'));
+    const nextNum = (existingProcs.length * 10) + 10;
+    const paddedNum = nextNum.toString().padStart(3, '0');
+    
+    const slug = title.replace(/^The\s+/i, '').replace(/[^a-zA-Z0-9]/g, '-').toUpperCase().substring(0, 20).replace(/-+$/, '');
+    const uid = `KMS-PROC-${paddedNum}-${slug}`;
+
+    const targetDir = path.join(this.registryRoot, 'gov/protocols');
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const filePath = path.join(targetDir, `${uid}.md`);
+
+    const frontmatter = {
+      'artifact-uid': uid,
+      'schema-version': '1.0.0',
+      'ka-gate-auth': 'ROLE-KA-ROOT',
+      'status': 'ACTIVE',
+      'domain': domain || '#protocols | #Internal',
+      'org-root': 'org',
+      'upstream-context': upstream_context || '[[./KMS-GOV-PROC-CHARTER.md]]' 
+    };
+
+    let markdown = `# Protocol: ${title} (${uid})\n\n`;
+    markdown += `---\n${yaml.stringify(frontmatter)}---\n\n`;
+    
+    markdown += `## 1. Execution Steps\n`;
+    steps.forEach((step, i) => { 
+        markdown += `${i + 1}. **${step.action}**: ${step.description}\n`; 
+    });
+    
+    markdown += `\n---\n🛡️ **[DLR_AUD_ARTIFACT]** ${uid} compiled via MCP Gatekeeper.`;
+
+    fs.writeFileSync(filePath, markdown, 'utf8');
+
+    return { uid, path: filePath, status: 'SUCCESS' };
+  }
+
+}

@@ -1,0 +1,174 @@
+import fs from 'fs';
+import path from 'path';
+import yaml from 'yaml';
+
+/**
+ * Phase 1: The L0 Foundation (The Graph Engine)
+ * Parses OIS Markdown files and builds an in-memory graph.
+ */
+export class OisParser {
+  constructor(registryRoot) {
+    this.registryRoot = registryRoot;
+    this.graph = new Map(); // Key: artifact-uid, Value: ParsedNode
+  }
+
+  /**
+   * Initializes the engine by walking the registry and parsing all nodes.
+   */
+  async buildGraph() {
+    console.error(`[OisParser] Scanning registry at ${this.registryRoot}`);
+    const files = this._walkSync(this.registryRoot);
+    
+    for (const file of files) {
+      if (file.endsWith('.md')) {
+        this._parseFile(file);
+      }
+    }
+    console.error(`[OisParser] Graph built. Indexed ${this.graph.size} nodes.`);
+  }
+
+  /**
+   * Recursively walks a directory.
+   */
+  _walkSync(dir, filelist = []) {
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      const dirFile = path.join(dir, file);
+      const dirent = fs.statSync(dirFile);
+      if (dirent.isDirectory()) {
+        filelist = this._walkSync(dirFile, filelist);
+      } else {
+        filelist.push(dirFile);
+      }
+    }
+    return filelist;
+  }
+
+  /**
+   * Parses a single Markdown file, extracting YAML frontmatter and computing upstream linkages.
+   */
+  _parseFile(filePath) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    
+    // Extract YAML frontmatter
+    const frontmatterRegex = /^---\n([\s\S]*?)\n---/;
+    const match = content.match(frontmatterRegex);
+    
+    if (!match) return; // Skip files without frontmatter
+    
+    try {
+      const metadata = yaml.parse(match[1].trim());
+      if (!metadata || !metadata['artifact-uid']) return; // Skip non-OIS files
+      
+      const uid = metadata['artifact-uid'];
+      
+      // Parse markdown body into a structured object (simplified for now)
+      const bodyText = content.replace(frontmatterRegex, '').trim();
+      const structure = this._parseMarkdownBody(bodyText);
+      
+      this.graph.set(uid, {
+        uid: uid,
+        path: filePath,
+        metadata: metadata,
+        content: structure,
+        rawBody: bodyText
+      });
+      
+    } catch (e) {
+      console.error(`[OisParser] Failed to parse YAML in ${filePath}:`, e.message);
+    }
+  }
+
+  /**
+   * Very basic markdown parser to map headers to keys.
+   */
+  _parseMarkdownBody(body) {
+    const lines = body.split('\n');
+    const result = {};
+    let currentKey = 'summary';
+    let currentBlock = [];
+
+    for (const line of lines) {
+      const headerMatch = line.match(/^##\s*(?:\d+\.\s*)?(.+)$/);
+      if (headerMatch) {
+        if (currentBlock.length > 0) {
+          result[currentKey] = currentBlock.join('\n').trim();
+        }
+        // Normalize key (e.g. "Specific Technical Duties" -> "specific_technical_duties")
+        currentKey = headerMatch[1].trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+        currentBlock = [];
+      } else {
+        currentBlock.push(line);
+      }
+    }
+    if (currentBlock.length > 0) {
+      result[currentKey] = currentBlock.join('\n').trim();
+    }
+    return result;
+  }
+
+  /**
+   * Returns a specific node from the graph.
+   */
+  getNode(uid) {
+    return this.graph.get(uid);
+  }
+
+  /**
+   * Helper to resolve the upstream context UID from a relative path link
+   */
+  resolveUpstreamUid(node) {
+     const upstream = node.metadata['upstream-context'];
+     if (!upstream) return null;
+     
+     let relativePath = null;
+
+     // Handle YAML array format
+     if (Array.isArray(upstream) && upstream.length > 0) {
+         if (typeof upstream[0] === 'string') {
+             // Handle: - '[[./file.md]]'
+             const match = upstream[0].match(/\[\[(.*?)\]\]/);
+             relativePath = match ? match[1] : upstream[0];
+         } else if (Array.isArray(upstream[0]) && upstream[0].length > 0 && typeof upstream[0][0] === 'string') {
+             // Handle weird nested array: - - ./file.md
+             relativePath = upstream[0][0];
+         }
+     } else if (typeof upstream === 'string') {
+         // Handle string format: '[[./file.md]]'
+         const match = upstream.match(/\[\[(.*?)\]\]/);
+         relativePath = match ? match[1] : upstream;
+     }
+
+     if (!relativePath) return null;
+
+     const targetFilename = path.basename(relativePath);
+     
+     // Search graph for a node with matching filename
+     for (const [uid, targetNode] of this.graph.entries()) {
+         if (path.basename(targetNode.path) === targetFilename) {
+             return uid;
+         }
+     }
+     return null;
+  }
+
+  /**
+   * Traverse upwards to the Root, returning an array of UIDs.
+   */
+  traceAncestry(leafUid) {
+    const trace = [];
+    let currentUid = leafUid;
+    
+    // Hard cap to prevent infinite loops in case of cyclical graphs
+    let depth = 0; 
+    while (currentUid && depth < 20) {
+      trace.push(currentUid);
+      const node = this.getNode(currentUid);
+      if (!node) break;
+      
+      currentUid = this.resolveUpstreamUid(node);
+      depth++;
+    }
+    return trace;
+  }
+}

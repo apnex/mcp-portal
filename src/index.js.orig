@@ -1,0 +1,271 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema
+} from "@modelcontextprotocol/sdk/types.js";
+import yaml from 'yaml';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+import { GraphEngine } from '../../ois-sdk/src/GraphEngine.js';
+import { OisLoader } from '../../ois-sdk/src/OisLoader.js';
+import { PathingEngine } from '../../ois-sdk/src/PathingEngine.js';
+import { MarkdownCompiler } from '../../ois-sdk/src/MarkdownCompiler.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REGISTRY_ROOT = path.resolve(__dirname, '../../../org');
+
+async function main() {
+  const engine = new GraphEngine();
+  const loader = new OisLoader(REGISTRY_ROOT, engine);
+  await loader.hydrateEngine();
+  
+  const pather = new PathingEngine(engine);
+  const compiler = new MarkdownCompiler(REGISTRY_ROOT);
+
+  const server = new Server(
+    { name: "ois-mcp-gateway", version: "5.1.0" },
+    { capabilities: { resources: {}, tools: {}, prompts: {} } }
+  );
+
+  // --- RESOURCES ---
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    const resources = [];
+    
+    const primitives = ['roles', 'axioms', 'protocols', 'charters', 'blueprints', 'skills', 'missions', 'health'];
+    for (const p of primitives) {
+        resources.push({ uri: `ois://network/${p}`, name: `Collection: ${p}`, mimeType: "application/x-yaml", description: `Returns all ${p}. Appending /active or /all alters the filter.` });
+    }
+    
+    resources.push({ uri: `ois://node/KMS-ROOT`, name: `OIS Root Node`, mimeType: "application/x-yaml", description: "The Organizational Singularity" });
+
+    return { resources };
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const uri = request.params.uri;
+    
+    if (uri.startsWith('ois://network/')) {
+        const parts = uri.replace('ois://network/', '').split('/');
+        const collectionType = parts[0]; 
+        const statusFilter = parts[1] || 'active'; 
+
+        let nodes = Array.from(engine.nodes.values());
+        let uids = [];
+        
+        if (statusFilter !== 'all') {
+            nodes = nodes.filter(n => n.metadata.status && n.metadata.status.toUpperCase() === statusFilter.toUpperCase());
+        }
+        
+        if (collectionType === 'roles') {
+            uids = nodes.filter(n => n.uid.startsWith('ROLE-')).map(n => n.uid);
+        } else if (collectionType === 'axioms') {
+            uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes('axioms')).map(n => n.uid);
+        } else if (collectionType === 'protocols') {
+            uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes('protocols')).map(n => n.uid);
+        } else if (collectionType === 'charters') {
+            uids = nodes.filter(n => n.uid.includes('-CHARTER')).map(n => n.uid);
+        } else if (collectionType === 'blueprints') {
+            uids = nodes.filter(n => n.uid.startsWith('KMS-BP-')).map(n => n.uid);
+        } else if (collectionType === 'skills') {
+            uids = nodes.filter(n => n.uid.startsWith('SKL-')).map(n => n.uid);
+        } else if (collectionType === 'missions') {
+            uids = nodes.filter(n => n.uid.startsWith('MSN-') || n.uid.startsWith('KMS-MSN-')).map(n => n.uid);
+        } else if (collectionType === 'health') {
+            const faults = [{ uid: 'KMS-KNG-INDEX-ENG', faults: [{ id: 'FAULT-10', desc: 'Broken Macro Link' }] }];
+            return { contents: [{ uri, mimeType: "application/x-yaml", text: "```yaml\n" + yaml.stringify({ active_faults: faults }) + "\n```" }] };
+        } else {
+            throw new Error(`Unknown network collection primitive: ${collectionType}`);
+        }
+
+        return { contents: [{ uri, mimeType: "application/x-yaml", text: "```yaml\n" + yaml.stringify({ [collectionType]: uids }) + "\n```" }] };
+    }
+
+    if (uri.startsWith('ois://node/')) {
+      const parts = uri.replace('ois://node/', '').split('/');
+      const uid = parts[0];
+      const modifier = parts[1]; 
+      
+      const node = engine.getNode(uid);
+      if (!node) throw new Error(`Node not found: ${uid}`);
+
+      let payload;
+      if (modifier === 'ancestors') {
+          payload = { ancestry: pather.findPath(uid, 'KMS-ROOT', { h_up: true }) };
+      } else if (modifier) {
+          if (node.content[modifier]) payload = { [modifier]: node.content[modifier] };
+          else if (node.metadata[modifier]) payload = { [modifier]: node.metadata[modifier] };
+          else throw new Error(`Field ${modifier} not found`);
+      } else {
+          payload = { metadata: node.metadata, content: node.content };
+      }
+      return { contents: [{ uri, mimeType: "application/x-yaml", text: "```yaml\n" + yaml.stringify(payload) + "\n```" }] };
+    }
+    throw new Error(`URI not recognized: ${uri}`);
+  });
+
+  // --- PROMPTS ---
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+      return { prompts: [{ name: "socket_3d_persona", arguments: [{ name: "role_id", required: true }] }] };
+  });
+
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      if (request.params.name === "socket_3d_persona") {
+          const roleId = request.params.arguments.role_id;
+          if (!engine.getNode(roleId)) throw new Error(`Role not found: ${roleId}`);
+
+          const trace = pather.findPath(roleId, 'KMS-ROOT', { h_up: true });
+          
+          const hydratedPayload = {
+              system_topology: { active_socket: roleId, ancestry_trace: trace.reverse() },
+              hydrated_nodes: {},
+              cultural_context: {}, 
+              actionable_context: {} 
+          };
+
+          for (const uid of hydratedPayload.system_topology.ancestry_trace) {
+              const node = engine.getNode(uid);
+              if (node) {
+                  hydratedPayload.hydrated_nodes[uid] = node.content;
+                  const zonePath = path.dirname(node.path);
+                  const zonePeers = engine.getZoneMembers(zonePath);
+                  for (const peerUid of zonePeers) {
+                      if (peerUid !== uid) {
+                          const peerNode = engine.getNode(peerUid);
+                          if (peerNode) hydratedPayload.cultural_context[peerUid] = peerNode.content;
+                      }
+                  }
+              }
+          }
+          
+          const directPeers = engine.getWires(roleId);
+          for (const peerUid of directPeers) {
+              const peerNode = engine.getNode(peerUid);
+              if (peerNode) hydratedPayload.actionable_context[peerUid] = peerNode.content;
+          }
+
+          return { messages: [{ role: "user", content: { type: "text", text: "You are now socketed into " + roleId + ". Acknowledge your constraints:\n\n```yaml\n" + yaml.stringify(hydratedPayload) + "\n```" } }] };
+      }
+      throw new Error("Prompt not found");
+  });
+
+  // --- TOOLS ---
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: [
+        {
+          name: "query_graph",
+          description: "The universal traversal engine for the OIS graph.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              src_uid: { type: "string" },
+              dst_uid: { type: "string", description: "If provided, executes a targeted Route. If omitted, executes a radial Scan." },
+              depth: { type: "integer", description: "Only applies if dst_uid is omitted. Defines how many hops to scan outward. Defaults to 1." },
+              planes: { 
+                  type: "object", 
+                  properties: {
+                      h_up: { type: "boolean" },
+                      h_down: { type: "boolean" },
+                      t_out: { type: "boolean" },
+                      s_zone: { type: "boolean" }
+                  }
+              },
+              hydrate: { type: "boolean" },
+              reverse_delivery: { type: "boolean" }
+            },
+            required: ["src_uid"]
+          }
+        },
+        { name: "submit_axiom", inputSchema: { type: "object", properties: { title: { type: "string" }, mandate: { type: "string" }, mechanics: { type: "array", items: { type: "string" } }, rationale: { type: "string" }, system_consequences: { type: "array", items: { type: "string" } } }, required: ["title", "mandate", "mechanics", "rationale", "system_consequences"] } },
+        { name: "submit_role_spec", inputSchema: { type: "object", properties: { id: { type: "string" }, title: { type: "string" }, entity_class: { type: "string" }, hierarchy_level: { type: "string" }, tags: { type: "array", items: { type: "string" } }, clearance: { type: "string" }, mission: { type: "string" }, pillars: { type: "array", items: { type: "string" } }, technical_duties: { type: "array", items: { type: "string" } }, constraints: { type: "array", items: { type: "string" } }, h_plane_up: { type: "string" } }, required: ["id", "title", "entity_class", "hierarchy_level", "tags", "clearance", "mission", "pillars", "technical_duties", "constraints", "h_plane_up"] } },
+        { name: "submit_protocol", inputSchema: { type: "object", properties: { title: { type: "string" }, tags: { type: "array", items: { type: "string" } }, h_plane_up: { type: "string" }, steps: { type: "array", items: { type: "object", properties: { action: { type: "string" }, description: { type: "string" } }, required: ["action", "description"] } } }, required: ["title", "steps"] } },
+        { name: "submit_generic_artifact", inputSchema: { type: "object", properties: { uid: { type: "string" }, title: { type: "string" }, tags: { type: "array", items: { type: "string" } }, h_plane_up: { type: "string" }, sections: { type: "array", items: { type: "object", properties: { heading: { type: "string" }, body: { type: "string" } }, required: ["heading", "body"] } } }, required: ["uid", "title", "tags", "h_plane_up", "sections"] } },
+        { name: "update_artifact_field", inputSchema: { type: "object", properties: { uid: { type: "string" }, field: { type: "string" }, new_content: { type: "array", items: { type: "string" } } }, required: ["uid", "field", "new_content"] } },
+        { name: "append_artifact_section", inputSchema: { type: "object", properties: { uid: { type: "string" }, heading: { type: "string" }, body: { type: "string" } }, required: ["uid", "heading", "body"] } },
+        { name: "update_artifact_metadata", inputSchema: { type: "object", properties: { uid: { type: "string" }, h_plane_up: { type: "string" }, tags: { type: "array", items: { type: "string" } }, status: { type: "string" } }, required: ["uid"] } }
+      ]
+    };
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    
+    if (request.params.name === "query_graph") {
+        const { src_uid, dst_uid, depth, planes, hydrate, reverse_delivery } = request.params.arguments;
+        
+        const routingPlanes = planes || { h_up: true, h_down: true, t_out: true, s_zone: true };
+        
+        let pathNodes = [];
+        if (!dst_uid) {
+            const scanDepth = depth !== undefined ? depth : 1;
+            pathNodes = pather.scanSubnet(src_uid, scanDepth, routingPlanes);
+        } else {
+            pathNodes = pather.findPath(src_uid, dst_uid, routingPlanes);
+        }
+        
+        let finalUids = [...new Set(pathNodes)];
+        if (reverse_delivery) finalUids.reverse();
+
+        if (hydrate) {
+            let hydratedData = {};
+            for (const uid of finalUids) {
+                const node = engine.getNode(uid);
+                hydratedData[uid] = node ? node.content : "Not Found";
+            }
+            return { content: [{ type: "text", text: "```yaml\n" + yaml.stringify({ result: hydratedData }) + "\n```" }] };
+        }
+        
+        return { content: [{ type: "text", text: "```yaml\n" + yaml.stringify({ result: finalUids }) + "\n```" }] };
+    }
+    
+    if (request.params.name === "submit_axiom") {
+        const result = await compiler.compileAndWriteAxiom(request.params.arguments, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully compiled.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "submit_role_spec") {
+        const result = await compiler.compileAndWriteRoleSpec(request.params.arguments, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully compiled.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "submit_protocol") {
+        const result = await compiler.compileAndWriteProtocol(request.params.arguments, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully compiled.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "submit_generic_artifact") {
+        const result = await compiler.compileAndWriteGenericArtifact(request.params.arguments, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully compiled.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "update_artifact_field") {
+        const result = await compiler.updateArtifactField(request.params.arguments.uid, request.params.arguments.field, request.params.arguments.new_content, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully updated.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "append_artifact_section") {
+        const result = await compiler.appendArtifactSection(request.params.arguments.uid, request.params.arguments.heading, request.params.arguments.body, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully appended.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+    if (request.params.name === "update_artifact_metadata") {
+        const result = await compiler.updateArtifactMetadata(request.params.arguments.uid, request.params.arguments, engine.nodes);
+        await loader.hydrateEngine(); 
+        return { content: [{ type: "text", text: "Successfully updated metadata.\n\n```yaml\n" + yaml.stringify(result) + "\n```" }] };
+    }
+
+    throw new Error("Tool not found");
+  });
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("OISv2 MCP Gateway is running.");
+}
+
+main().catch(console.error);

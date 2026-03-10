@@ -1,0 +1,45 @@
+import { expect } from 'chai';
+import { OisParser } from '../src/OisParser.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const REGISTRY_ROOT = path.resolve(__dirname, '../../../org');
+
+describe('L0 Foundation: OisParser (Universal Pathfinder & Adjacency)', function() {
+  let parser;
+
+  before(async function() {
+    parser = new OisParser(REGISTRY_ROOT);
+    await parser.buildGraph();
+  });
+
+  it('must perform simple BFS pathfinding to a specific target', function() {
+    // ROLE-GOV-KA-ROOT -> KMS-GOV-ROOT -> KMS-ROOT
+    const trace = parser.findPath('ROLE-GOV-KA-ROOT', 'KMS-ROOT');
+    expect(trace).to.be.an('array');
+    expect(trace[0]).to.equal('ROLE-GOV-KA-ROOT');
+    expect(trace[trace.length - 1]).to.equal('KMS-ROOT');
+  });
+
+  it('must calculate Local adjacencies (same directory)', function() {
+    // KMS-META-010 and KMS-META-020 live in gov/axioms
+    const locals = parser.getLocalAdjacencies('KMS-META-010-STATE-SOVEREIGNTY');
+    expect(locals).to.include('KMS-META-020-INTERFACE-SINGULARITY');
+    expect(locals).to.not.include('KMS-ROOT'); // Outside directory
+  });
+
+  it('must calculate Direct adjacencies (inline body links)', function() {
+    // ROLE-GOV-KA-ROOT explicitly links to [[./KMS-GOV-STRAT.md]] in its body
+    const direct = parser.getDirectAdjacencies('ROLE-GOV-KA-ROOT');
+    expect(direct).to.include('KMS-GOV-STRAT');
+  });
+
+  it('must calculate Broadcast adjacencies (downstream children)', function() {
+    // Both ROLE-GOV-KA-ROOT and KMS-GOV-STRAT declare KMS-GOV-ROOT as upstream
+    const broadcast = parser.getBroadcastAdjacencies('KMS-GOV-ROOT');
+    expect(broadcast).to.include('ROLE-GOV-KA-ROOT');
+    expect(broadcast).to.include('KMS-GOV-STRAT');
+  });
+});
