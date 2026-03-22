@@ -1,7 +1,7 @@
 import { expect } from 'chai';
-import { GraphEngine } from '../../ois-sdk/src/GraphEngine.js';
-import { OisLoader } from '../../ois-sdk/src/OisLoader.js';
-import { PathingEngine } from '../../ois-sdk/src/PathingEngine.js';
+import { GraphEngine } from '../../portal-sdk/src/GraphEngine.js';
+import { OisLoader } from '../../portal-sdk/src/OisLoader.js';
+import { PathingEngine } from '../../portal-sdk/src/PathingEngine.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'yaml';

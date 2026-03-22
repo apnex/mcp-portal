@@ -1,5 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express from 'express';
 import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -10,19 +11,19 @@ import yaml from 'yaml';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { GraphEngine } from '../../ois-sdk/src/GraphEngine.js';
-import { OisLoader } from '../../ois-sdk/src/OisLoader.js';
-import { PathingEngine } from '../../ois-sdk/src/PathingEngine.js';
-import { TopologyEngine } from '../../ois-sdk/src/TopologyEngine.js';
-import { MarkdownCompiler } from '../../ois-sdk/src/MarkdownCompiler.js';
-import { TagEngine } from "../../ois-sdk/src/TagEngine.js";
-import { MetabolismEngine } from "../../ois-sdk/src/MetabolismEngine.js";
-import { AnchorManager } from "../../ois-sdk/src/AnchorManager.js";
+import { GraphEngine } from './sdk/GraphEngine.js';
+import { OisLoader } from './sdk/OisLoader.js';
+import { PathingEngine } from './sdk/PathingEngine.js';
+import { TopologyEngine } from './sdk/TopologyEngine.js';
+import { MarkdownCompiler } from './sdk/MarkdownCompiler.js';
+import { TagEngine } from "./sdk/TagEngine.js";
+import { MetabolismEngine } from "./sdk/MetabolismEngine.js";
+import { AnchorManager } from "./sdk/AnchorManager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const REGISTRY_ROOT = path.resolve(__dirname, '../../../org');
-const STORAGE_ROOT = path.resolve(__dirname, '../storage/anchors');
+const REGISTRY_ROOT = process.env.OIS_ROOT_PATH || path.resolve(__dirname, '../../../org');
+const STORAGE_ROOT = process.env.OIS_STORAGE_PATH || path.resolve(__dirname, '../storage/anchors');
 
 async function main() {
   const engine = new GraphEngine();
@@ -44,10 +45,22 @@ async function main() {
     { capabilities: { resources: {}, tools: {} }, }
   );
 
+  // --- DECLARATIVE FILTERS ---
+  const collectionFilters = {
+    nodes:      (n) => true,
+    roles:      (n) => n.uid.startsWith('ROLE-'),
+    axioms:     (n) => n.metadata?.tags?.includes('axiom'),
+    protocols:  (n) => n.metadata?.tags?.includes('protocol'),
+    charters:   (n) => n.uid.includes('-CHARTER'),
+    blueprints: (n) => n.uid.startsWith('KMS-BP-'),
+    skills:     (n) => n.uid.startsWith('SKL-'),
+    missions:   (n) => n.uid.startsWith('MSN-') || n.uid.startsWith('KMS-MSN-')
+  };
+
   // --- RESOURCES ---
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
     const resources = [];
-    const primitives = ['roles', 'axioms', 'protocols', 'charters', 'blueprints', 'skills', 'missions', 'health'];
+    const primitives = ['nodes', 'roles', 'axioms', 'protocols', 'charters', 'blueprints', 'skills', 'missions', 'health'];
     for (const p of primitives) {
         resources.push({ uri: `ois://network/${p}`, name: `Collection: ${p}`, mimeType: "application/x-yaml", description: `Returns all ${p}.` });
     }
@@ -59,19 +72,18 @@ async function main() {
     const uri = request.params.uri;
     if (uri.startsWith('ois://network/')) {
         const parts = uri.replace('ois://network/', '').split('/');
-        const collectionType = parts[0]; 
-        const statusFilter = parts[1] || 'active'; 
+        const collectionType = parts[0];
+        const statusFilter = parts[1] || 'active';
         let nodes = Array.from(engine.nodes.values());
+
         if (statusFilter !== 'all') {
             nodes = nodes.filter(n => n.metadata.status && n.metadata.status.toUpperCase() === statusFilter.toUpperCase());
         }
-        let uids = [];
-        if (collectionType === 'roles') uids = nodes.filter(n => n.uid.startsWith('ROLE-')).map(n => n.uid);
-        else if (collectionType === 'axioms') uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes('axiom')).map(n => n.uid);
-        else if (collectionType === 'protocols') uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes('protocol')).map(n => n.uid);
-        else if (collectionType === 'charters') uids = nodes.filter(n => n.uid.includes('-CHARTER')).map(n => n.uid);
-        else if (collectionType === 'missions') uids = nodes.filter(n => n.uid.startsWith('MSN-') || n.uid.startsWith('KMS-MSN-')).map(n => n.uid);
-        else throw new Error(`Unknown collection: ${collectionType}`);
+
+        const filterFn = collectionFilters[collectionType];
+        if (!filterFn) throw new Error(`Unknown collection: ${collectionType}`);
+
+        const uids = nodes.filter(filterFn).map(n => n.uid);
         return { contents: [{ uri, mimeType: "application/x-yaml", text: "```yaml\n" + yaml.stringify({ [collectionType]: uids }) + "\n```" }] };
     }
     if (uri.startsWith('ois://node/')) {
@@ -95,8 +107,8 @@ async function main() {
             properties: {
               token: { type: "string", description: "The 8-character Anchor ID from a previous pulse. If provided, all other parameters are ignored." },
               src_uid: { type: "string", description: "The UID to start unfolding from (Topological Walk)." },
-              frustum: { 
-                  type: "object", 
+              frustum: {
+                  type: "object",
                   description: "Spatial slice parameters (Bypasses links).",
                   properties: {
                       y: { type: "integer", description: "Filter by Hierarchical Depth." },
@@ -107,8 +119,8 @@ async function main() {
               },
               lod: { type: "integer", enum: [0, 1, 2], description: "Level of Detail. 0: Discovery (UID:Vector), 1: Outline (Metadata), 2: Mastery (Full Content). Defaults to 0 or 2 based on hydrate flag." },
               depth: { type: "integer", description: "Maximum hops from origin. Defaults to 99." },
-              planes: { type: "object", description: "Boolean matrix for plane traversal (h_up, h_down, t_out, s_zone)." },
-              hydrate: { type: "boolean", description: "Legacy trigger for LOD 2. Use 'lod' for finer control." },
+              limit: { type: "integer", description: "Maximum nodes to yield per pulse. Defaults to 50 for LOD 1/2. If LOD is 0, defaults to -1 (Infinite) to allow full structural sweeps in one pulse." },
+              planes: { type: "object", description: "Boolean matrix for plane traversal (h_up, h_down, t_out, s_zone)." },              hydrate: { type: "boolean", description: "Legacy trigger for LOD 2. Use 'lod' for finer control." },
               raw_text: { type: "boolean", description: "If true, returns raw Markdown in LOD 2." },
               stream: { type: "boolean", description: "If true, returns results as a single flat string to bypass platform object limits." }
             }
@@ -124,7 +136,7 @@ async function main() {
         { name: "append_artifact_section", description: "Inject new blocks into an artifact.", inputSchema: { type: "object", properties: { uid: { type: "string" }, heading: { type: "string" }, body: { type: "string" } }, required: ["uid", "heading", "body"] } },
         { name: "update_artifact_metadata", description: "Alter topological graph routing.", inputSchema: { type: "object", properties: { uid: { type: "string" }, h_plane_up: { type: "string" }, tags: { type: "array", items: { type: "string" } }, status: { type: "string" } }, required: ["uid"] } },
         { name: "rewrite_artifact_body", description: "Overwrites the prose body of a document.", inputSchema: { type: "object", properties: { uid: { type: "string" }, raw_markdown_body: { type: "string" } }, required: ["uid", "raw_markdown_body"] } },
-        { name: "list_resources", description: "Discovery beacon.", inputSchema: { type: "object", properties: { collection_type: { type: "string", enum: ["roles", "axioms", "protocols", "charters", "blueprints", "skills", "missions", "health"] }, status_filter: { type: "string" } }, required: ["collection_type"] } },
+        { name: "list_resources", description: "Discovery beacon.", inputSchema: { type: "object", properties: { collection_type: { type: "string", enum: ["nodes", "roles", "axioms", "protocols", "charters", "blueprints", "skills", "missions", "health"] }, status_filter: { type: "string" } }, required: ["collection_type"] } },
         { name: "tag_manager", description: "S-Plane Lexicon Manager.", inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "propose"] }, tag: { type: "string" }, definition: { type: "string" } }, required: ["action"] } }
       ]
     };
@@ -153,7 +165,7 @@ async function main() {
                     frustum,
                     lod: lod !== undefined ? lod : (hydrate ? 2 : 0),
                     depth: depth || 99,
-                    limit: limit !== undefined ? limit : 50,
+                    limit: limit,
                     planes: planes || { h_down: true, h_up: true, t_out: true, s_zone: true },
                     hydrate: !!hydrate,
                     raw_text: !!raw_text
@@ -290,14 +302,11 @@ async function main() {
         const status = status_filter || "active";
         let nodes = Array.from(engine.nodes.values());
         if (status !== "all") nodes = nodes.filter(n => n.metadata.status && n.metadata.status.toUpperCase() === status.toUpperCase());
-        let uids = [];
-        if (collection_type === "roles") uids = nodes.filter(n => n.uid.startsWith("ROLE-")).map(n => n.uid);
-        else if (collection_type === "axioms") uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes("axiom")).map(n => n.uid);
-        else if (collection_type === "protocols") uids = nodes.filter(n => n.metadata.tags && n.metadata.tags.includes("protocol")).map(n => n.uid);
-        else if (collection_type === "charters") uids = nodes.filter(n => n.uid.includes("-CHARTER")).map(n => n.uid);
-        else if (collection_type === "blueprints") uids = nodes.filter(n => n.uid.startsWith("KMS-BP-")).map(n => n.uid);
-        else if (collection_type === "skills") uids = nodes.filter(n => n.uid.startsWith("SKL-")).map(n => n.uid);
-        else if (collection_type === "missions") uids = nodes.filter(n => n.uid.startsWith("MSN-") || n.uid.startsWith("KMS-MSN-")).map(n => n.uid);
+
+        const filterFn = collectionFilters[collection_type];
+        if (!filterFn) throw new Error(`Unknown collection: ${collection_type}`);
+
+        const uids = nodes.filter(filterFn).map(n => n.uid);
         return { content: [{ type: "text", text: "```yaml\n" + yaml.stringify({ [collection_type]: uids }) + "\n```" }] };
     }
 
@@ -313,8 +322,30 @@ async function main() {
     throw new Error("Tool not found");
   });
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const app = express();
+  let transport;
+
+  app.get("/mcp/sse", async (req, res) => {
+    if (transport) {
+      try { await server.close(); } catch (e) {}
+    }
+    transport = new SSEServerTransport("/mcp/message", res);
+    await server.connect(transport);
+  });
+
+  app.post("/mcp/message", async (req, res) => {
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(503).send("SSE connection not established");
+    }
+  });
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[OIS Gateway] Daemon active. Listening on port ${PORT}`);
+    console.log(`[OIS Gateway] SSE Endpoint: http://localhost:${PORT}/mcp/sse`);
+  });
 }
 
 main().catch(console.error);

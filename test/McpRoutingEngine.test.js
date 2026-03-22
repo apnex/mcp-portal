@@ -1,8 +1,8 @@
 import { expect } from 'chai';
-import { GraphEngine } from '../../ois-sdk/src/GraphEngine.js';
-import { OisLoader } from '../../ois-sdk/src/OisLoader.js';
-import { PathingEngine } from '../../ois-sdk/src/PathingEngine.js';
-import { TopologyEngine } from '../../ois-sdk/src/TopologyEngine.js';
+import { GraphEngine } from '../src/sdk/GraphEngine.js';
+import { OisLoader } from '../src/sdk/OisLoader.js';
+import { PathingEngine } from '../src/sdk/PathingEngine.js';
+import { TopologyEngine } from '../src/sdk/TopologyEngine.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -26,14 +26,14 @@ describe('L2 Routing Engine: The Managed Switch (SDK Adapter)', function() {
   it('must compute the Persona Topology using the new TopologyEngine', function() {
     const roleId = 'ROLE-GOV-KA-ROOT';
     const topology = topologyEngine.computePersonaTopology(roleId);
-    
-    expect(topology.system_topology.ancestry_trace[0]).to.equal('KMS-ROOT'); 
-    expect(topology.system_topology.ancestry_trace[2]).to.equal('ROLE-GOV-KA-ROOT'); 
 
-    expect(topology.cultural_context_uids).to.include('KMS-ROOT-HD'); 
-    expect(topology.actionable_context_uids).to.include('KMS-GOV-PROTOCOL-INGESTION');
+    expect(topology.state.queue[0].uid).to.equal('KMS-ROOT');
+    expect(topology.state.queue[2].uid).to.equal('ROLE-GOV-KA-ROOT');
+
+    // Verify it gathered horizontal context successfully
+    expect(topology.state.visited_uids).to.include('KMS-ROOT-HD');
+    expect(topology.state.visited_uids).to.include('KMS-GOV-PROTOCOL-INGESTION');
   });
-
   it('must expose inspect_socket_topology natively', async function() {
       const fs = await import('fs').then(m => m.default);
       const indexCode = fs.readFileSync(path.resolve(__dirname, '../src/index.js'), 'utf8');

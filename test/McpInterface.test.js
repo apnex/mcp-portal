@@ -1,7 +1,7 @@
 import { expect } from 'chai';
-import { GraphEngine } from '../../ois-sdk/src/GraphEngine.js';
-import { OisLoader } from '../../ois-sdk/src/OisLoader.js';
-import { PathingEngine } from '../../ois-sdk/src/PathingEngine.js';
+import { GraphEngine } from '../src/sdk/GraphEngine.js';
+import { OisLoader } from '../src/sdk/OisLoader.js';
+import { PathingEngine } from '../src/sdk/PathingEngine.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'yaml';
@@ -34,7 +34,8 @@ describe('L1 Core: MCP Universal query_graph Tool (SDK Adapter)', function() {
       if (args.reverse_delivery) pathNodes.reverse();
       
       let hydratedData = {};
-      for (const uid of pathNodes) {
+      for (const p of pathNodes) {
+          const uid = p.uid;
           const node = engine.getNode(uid);
           hydratedData[uid] = node ? node.content : "Not Found";
       }

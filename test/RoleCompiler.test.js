@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { MarkdownCompiler } from '../../ois-sdk/src/MarkdownCompiler.js';
+import { MarkdownCompiler } from '../src/sdk/MarkdownCompiler.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
